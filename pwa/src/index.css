@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+/* Custom base styles for the collection app */
+@layer base {
+  body {
+    @apply bg-stone-50 text-stone-900 antialiased;
+    margin: 0;
+  }
+}
+
+/* Completeness dots */
+.dot-red { @apply w-3 h-3 rounded-full bg-red-500; }
+.dot-yellow { @apply w-3 h-3 rounded-full bg-yellow-500; }
+.dot-green { @apply w-3 h-3 rounded-full bg-green-500; }

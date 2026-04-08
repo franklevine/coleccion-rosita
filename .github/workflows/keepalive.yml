@@ -1,0 +1,16 @@
+name: Supabase Keepalive
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # Daily at 8am UTC
+  workflow_dispatch:       # Manual trigger
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase
+        run: |
+          curl -s -o /dev/null -w "%{http_code}" \
+            "${{ secrets.VITE_SUPABASE_URL }}/rest/v1/?apikey=${{ secrets.VITE_SUPABASE_ANON_KEY }}" \
+            | grep -q "200" && echo "Supabase is alive" || echo "Ping failed"
