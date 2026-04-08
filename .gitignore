@@ -11,6 +11,9 @@ pwa/dist/
 .env.*.local
 scripts/.env
 
+# PDF reports (too large for git, keep local)
+202604 PDF Reports/
+
 # OS files
 .DS_Store
 Thumbs.db
