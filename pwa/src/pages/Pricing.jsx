@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
+import ImageLightbox from '../components/ImageLightbox'
 
 export default function Pricing() {
   const { user } = useAuth()
@@ -91,6 +92,7 @@ function PricingRow({ piece, user, onUpdate }) {
   const [confidence, setConfidence] = useState('Media')
   const [title, setTitle] = useState(piece.title)
   const [saving, setSaving] = useState(false)
+  const [showLightbox, setShowLightbox] = useState(false)
   const valueRef = useRef(null)
 
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -121,8 +123,11 @@ function PricingRow({ piece, user, onUpdate }) {
 
   return (
     <div className="bg-white border border-stone-200 rounded-lg p-3 flex gap-3 items-start">
-      {/* Thumbnail */}
-      <div className="w-12 h-12 bg-stone-100 rounded shrink-0 overflow-hidden">
+      {/* Thumbnail — clickable to expand */}
+      <div
+        className="w-12 h-12 bg-stone-100 rounded shrink-0 overflow-hidden cursor-pointer"
+        onClick={() => piece.primary_thumbnail && setShowLightbox(true)}
+      >
         {piece.primary_thumbnail ? (
           <img
             src={`${supabaseUrl}/storage/v1/object/public/thumbnails/${piece.primary_thumbnail}`}
@@ -133,6 +138,15 @@ function PricingRow({ piece, user, onUpdate }) {
           <div className="w-full h-full flex items-center justify-center text-stone-300 text-sm">🖼</div>
         )}
       </div>
+
+      {/* Lightbox */}
+      {showLightbox && piece.primary_thumbnail && (
+        <ImageLightbox
+          src={`${supabaseUrl}/storage/v1/object/public/thumbnails/${piece.primary_thumbnail}`}
+          alt={piece.title}
+          onClose={() => setShowLightbox(false)}
+        />
+      )}
 
       {/* Info */}
       <div className="flex-1 min-w-0">

@@ -17,8 +17,9 @@ export default function PieceDetail() {
   const [form, setForm] = useState({})
   const [saving, setSaving] = useState(false)
 
-  const canEdit = ['admin', 'editor', 'pricing'].includes(role)
-  const canEditAll = ['admin', 'editor'].includes(role)
+  const isLocked = piece?.is_locked && role !== 'admin'
+  const canEdit = !isLocked
+  const isAdmin = role === 'admin'
 
   useEffect(() => {
     fetchAll()
@@ -46,9 +47,7 @@ export default function PieceDetail() {
   async function handleSave() {
     setSaving(true)
     const updates = {}
-    const editableFields = canEditAll
-      ? ['title', 'artist_id', 'year_created', 'medium', 'type_of_art', 'dimensions', 'location', 'status', 'condition_notes', 'provenance_notes', 'description', 'notes', 'is_signed']
-      : ['title', 'artist_id'] // pricing role: only title + artist
+    const editableFields = ['title', 'artist_id', 'year_created', 'medium', 'type_of_art', 'dimensions', 'location', 'status', 'condition_notes', 'provenance_notes', 'description', 'notes', 'is_signed']
 
     for (const field of editableFields) {
       if (form[field] !== piece[field]) {
@@ -128,15 +127,31 @@ export default function PieceDetail() {
         <WishlistHeart pieceId={piece.id} />
       </div>
 
-      {/* Edit toggle */}
-      {canEdit && !editing && (
-        <button
-          onClick={() => setEditing(true)}
-          className="text-sm text-stone-500 hover:text-stone-800 mb-4"
-        >
-          Editar
-        </button>
-      )}
+      {/* Lock indicator + Edit toggle */}
+      <div className="flex items-center gap-3 mb-4">
+        {canEdit && !editing && (
+          <button
+            onClick={() => setEditing(true)}
+            className="text-sm text-stone-500 hover:text-stone-800"
+          >
+            Editar
+          </button>
+        )}
+        {isLocked && (
+          <span className="text-xs text-red-500">Bloqueada por admin</span>
+        )}
+        {isAdmin && (
+          <button
+            onClick={async () => {
+              await supabase.from('pieces').update({ is_locked: !piece.is_locked }).eq('id', id)
+              await fetchAll()
+            }}
+            className={`text-xs px-2 py-1 rounded ${piece.is_locked ? 'bg-red-100 text-red-700' : 'bg-stone-100 text-stone-500'}`}
+          >
+            {piece.is_locked ? 'Desbloquear' : 'Bloquear edición'}
+          </button>
+        )}
+      </div>
 
       {/* Metadata */}
       <div className="space-y-3 mb-6">
@@ -144,7 +159,6 @@ export default function PieceDetail() {
           <EditForm
             form={form}
             setForm={setForm}
-            canEditAll={canEditAll}
             onSave={handleSave}
             onCancel={() => { setEditing(false); setForm(piece) }}
             saving={saving}
@@ -243,7 +257,7 @@ function MetadataDisplay({ piece }) {
   )
 }
 
-function EditForm({ form, setForm, canEditAll, onSave, onCancel, saving }) {
+function EditForm({ form, setForm, onSave, onCancel, saving }) {
   const set = (field) => (e) =>
     setForm({ ...form, [field]: e.target.type === 'checkbox' ? e.target.checked : e.target.value })
 
@@ -254,53 +268,48 @@ function EditForm({ form, setForm, canEditAll, onSave, onCancel, saving }) {
       <Field label="Título">
         <input value={form.title || ''} onChange={set('title')} className={inputClass} />
       </Field>
-
-      {canEditAll && (
-        <>
-          <Field label="Año">
-            <input type="number" value={form.year_created || ''} onChange={set('year_created')} className={inputClass} />
-          </Field>
-          <Field label="Técnica">
-            <input value={form.medium || ''} onChange={set('medium')} className={inputClass} placeholder="Óleo sobre tela" />
-          </Field>
-          <Field label="Tipo">
-            <select value={form.type_of_art || ''} onChange={set('type_of_art')} className={inputClass}>
-              <option value="">—</option>
-              {['Pintura', 'Escultura', 'Grabado', 'Fotografía', 'Dibujo', 'Mixta', 'Otro'].map((t) => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Dimensiones">
-            <input value={form.dimensions || ''} onChange={set('dimensions')} className={inputClass} placeholder="80 × 60 cm" />
-          </Field>
-          <Field label="Ubicación">
-            <input value={form.location || ''} onChange={set('location')} className={inputClass} />
-          </Field>
-          <Field label="Estado">
-            <select value={form.status || ''} onChange={set('status')} className={inputClass}>
-              {['Disponible', 'Vendida', 'Donada', 'Perdida', 'Dañada'].map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Condición">
-            <textarea value={form.condition_notes || ''} onChange={set('condition_notes')} className={inputClass} rows={2} />
-          </Field>
-          <Field label="Procedencia">
-            <textarea value={form.provenance_notes || ''} onChange={set('provenance_notes')} className={inputClass} rows={2} />
-          </Field>
-          <Field label="Descripción">
-            <textarea value={form.description || ''} onChange={set('description')} className={inputClass} rows={2} />
-          </Field>
-          <Field label="Notas">
-            <textarea value={form.notes || ''} onChange={set('notes')} className={inputClass} rows={2} />
-          </Field>
-          <Field label="Firmada">
-            <input type="checkbox" checked={form.is_signed || false} onChange={set('is_signed')} />
-          </Field>
-        </>
-      )}
+      <Field label="Año">
+        <input type="number" value={form.year_created || ''} onChange={set('year_created')} className={inputClass} />
+      </Field>
+      <Field label="Técnica">
+        <input value={form.medium || ''} onChange={set('medium')} className={inputClass} placeholder="Óleo sobre tela" />
+      </Field>
+      <Field label="Tipo">
+        <select value={form.type_of_art || ''} onChange={set('type_of_art')} className={inputClass}>
+          <option value="">—</option>
+          {['Pintura', 'Escultura', 'Grabado', 'Fotografía', 'Dibujo', 'Mixta', 'Otro'].map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
+      </Field>
+      <Field label="Dimensiones">
+        <input value={form.dimensions || ''} onChange={set('dimensions')} className={inputClass} placeholder="80 × 60 cm" />
+      </Field>
+      <Field label="Ubicación">
+        <input value={form.location || ''} onChange={set('location')} className={inputClass} />
+      </Field>
+      <Field label="Estado">
+        <select value={form.status || ''} onChange={set('status')} className={inputClass}>
+          {['Disponible', 'Vendida', 'Donada', 'Perdida', 'Dañada'].map((s) => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+      </Field>
+      <Field label="Condición">
+        <textarea value={form.condition_notes || ''} onChange={set('condition_notes')} className={inputClass} rows={2} />
+      </Field>
+      <Field label="Procedencia">
+        <textarea value={form.provenance_notes || ''} onChange={set('provenance_notes')} className={inputClass} rows={2} />
+      </Field>
+      <Field label="Descripción">
+        <textarea value={form.description || ''} onChange={set('description')} className={inputClass} rows={2} />
+      </Field>
+      <Field label="Notas">
+        <textarea value={form.notes || ''} onChange={set('notes')} className={inputClass} rows={2} />
+      </Field>
+      <Field label="Firmada">
+        <input type="checkbox" checked={form.is_signed || false} onChange={set('is_signed')} />
+      </Field>
 
       <div className="flex gap-2 pt-2">
         <button
