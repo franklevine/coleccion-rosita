@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Layout from './components/Layout'
 import Login from './pages/Login'
+import NewPassword from './pages/NewPassword'
 import Gallery from './pages/Gallery'
 import PieceDetail from './pages/PieceDetail'
 import Pricing from './pages/Pricing'
@@ -18,9 +19,12 @@ function ProtectedRoute({ children }) {
 }
 
 function AppRoutes() {
-  const { user, loading } = useAuth()
+  const { user, loading, recovery } = useAuth()
 
   if (loading) return <div className="min-h-screen flex items-center justify-center text-stone-400">Cargando...</div>
+
+  // Arrived via the password-recovery email link: force the new-password screen
+  if (recovery) return <NewPassword />
 
   return (
     <Routes>
