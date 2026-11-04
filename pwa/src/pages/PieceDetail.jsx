@@ -1,374 +1,639 @@
-import { useEffect, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { useParams, Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import { calculateCompleteness, completenessStatus } from '../lib/completeness'
 import WishlistHeart from '../components/WishlistHeart'
+import ArtistPicker from '../components/ArtistPicker'
+import ImageLightbox from '../components/ImageLightbox'
+import { useToast } from '../components/Toast'
+
+const TYPES = ['Pintura', 'Escultura', 'Grabado', 'Fotografía', 'Dibujo', 'Mixta', 'Otro']
+const STATUSES = ['Disponible', 'Vendida', 'Donada', 'Perdida', 'Dañada']
+const CONFIDENCE = ['Alta', 'Media', 'Baja']
+const TECHNIQUES = [
+  'Óleo sobre tela', 'Óleo sobre madera', 'Acrílico sobre tela', 'Acuarela sobre papel',
+  'Tinta sobre papel', 'Lápiz sobre papel', 'Carboncillo', 'Pastel', 'Técnica mixta',
+  'Grabado', 'Litografía', 'Serigrafía', 'Xilografía', 'Aguafuerte',
+  'Bronce', 'Mármol', 'Madera tallada', 'Cerámica', 'Fotografía',
+]
+
+// Fields saved to `pieces`
+const PIECE_FIELDS = [
+  'title', 'artist_id', 'year_created', 'medium', 'type_of_art', 'dimensions',
+  'is_signed', 'notes', 'location', 'status', 'inventory_number',
+  'provenance_notes', 'condition_notes', 'description',
+]
+
+const NAV_KEY = 'rosita.nav.ids'
 
 export default function PieceDetail() {
   const { id } = useParams()
-  const { role } = useAuth()
+  const navigate = useNavigate()
+  const { role, user } = useAuth()
+  const { toast, show } = useToast()
+
   const [piece, setPiece] = useState(null)
   const [photos, setPhotos] = useState([])
   const [valuations, setValuations] = useState([])
-  const [activity, setActivity] = useState([])
   const [loading, setLoading] = useState(true)
-  const [editing, setEditing] = useState(false)
-  const [form, setForm] = useState({})
   const [saving, setSaving] = useState(false)
+  const [lightbox, setLightbox] = useState(null)
+  const [moreOpen, setMoreOpen] = useState(false)
 
-  const isLocked = piece?.is_locked && role !== 'admin'
-  const canEdit = !isLocked
+  // Editable state
+  const [form, setForm] = useState({})
+  const [artistName, setArtistName] = useState('')
+  const [val, setVal] = useState({ usd: '', clp: '', source: '', confidence: 'Media' })
+
+  // Navigation order (prev / next)
+  const [navIds, setNavIds] = useState([])
+
   const isAdmin = role === 'admin'
+  const isLocked = piece?.is_locked && !isAdmin
+  const canEdit = ['admin', 'editor', 'pricing'].includes(role) && !isLocked
+  const canCreateArtist = ['admin', 'editor'].includes(role)
+  const canValue = ['admin', 'editor', 'pricing'].includes(role)
 
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+  const thumbUrl = (p) => `${supabaseUrl}/storage/v1/object/public/thumbnails/${p.thumbnail_path}`
+
+  // ---------- Load ----------
   useEffect(() => {
     fetchAll()
+    window.scrollTo({ top: 0 })
+  }, [id])
+
+  useEffect(() => {
+    // Follow the gallery's current order if available; otherwise alphabetical
+    let ids = []
+    try { ids = JSON.parse(sessionStorage.getItem(NAV_KEY) || '[]') } catch { /* ignore */ }
+    if (ids.includes(id)) { setNavIds(ids); return }
+    supabase.from('pieces').select('id').order('title').then(({ data }) => {
+      if (data) setNavIds(data.map((p) => p.id))
+    })
   }, [id])
 
   async function fetchAll() {
     setLoading(true)
-    const [pieceRes, photosRes, valRes, actRes] = await Promise.all([
+    const [pieceRes, photosRes, valRes] = await Promise.all([
       supabase.from('pieces_with_details').select('*').eq('id', id).single(),
       supabase.from('photos').select('*').eq('piece_id', id).order('slot'),
       supabase.from('valuations').select('*').eq('piece_id', id).order('created_at', { ascending: false }),
-      supabase.from('activity_log').select('*').eq('entity_id', id).order('created_at', { ascending: false }).limit(20),
     ])
-
     if (pieceRes.data) {
       setPiece(pieceRes.data)
-      setForm(pieceRes.data)
+      resetForm(pieceRes.data, valRes.data?.[0])
     }
     if (photosRes.data) setPhotos(photosRes.data)
     if (valRes.data) setValuations(valRes.data)
-    if (actRes.data) setActivity(actRes.data)
     setLoading(false)
   }
 
-  async function handleSave() {
-    setSaving(true)
-    const updates = {}
-    const editableFields = ['title', 'artist_id', 'year_created', 'medium', 'type_of_art', 'dimensions', 'location', 'status', 'condition_notes', 'provenance_notes', 'description', 'notes', 'is_signed']
-
-    for (const field of editableFields) {
-      if (form[field] !== piece[field]) {
-        updates[field] = form[field] || null
-      }
-    }
-
-    if (Object.keys(updates).length > 0) {
-      // Recalculate completeness
-      const merged = { ...piece, ...updates }
-      updates.data_completeness = calculateCompleteness(merged, {
-        hasPhoto: photos.length > 0,
-        hasValuation: valuations.length > 0,
-      })
-
-      const { error } = await supabase.from('pieces').update(updates).eq('id', id)
-      if (!error) {
-        await fetchAll()
-        setEditing(false)
-      }
-    } else {
-      setEditing(false)
-    }
-    setSaving(false)
+  function resetForm(p, latest) {
+    const f = {}
+    for (const k of PIECE_FIELDS) f[k] = p[k] ?? (k === 'is_signed' ? false : '')
+    setForm(f)
+    setArtistName(p.artist_name || '')
+    setVal({
+      usd: latest?.estimated_value_usd ?? '',
+      clp: latest?.estimated_value_clp ?? '',
+      source: latest?.value_source ?? '',
+      confidence: latest?.confidence ?? 'Media',
+    })
+    setMoreOpen(false)
   }
 
-  if (loading) return <p className="text-center text-stone-400 py-12">Cargando...</p>
-  if (!piece) return <p className="text-center text-stone-400 py-12">Obra no encontrada</p>
+  // ---------- Dirty tracking ----------
+  const latest = valuations[0]
+  const pieceChanges = useMemo(() => {
+    if (!piece) return {}
+    const ch = {}
+    for (const k of PIECE_FIELDS) {
+      const before = piece[k] ?? (k === 'is_signed' ? false : '')
+      let after = form[k]
+      if (k === 'year_created') after = after === '' || after == null ? null : Number(after)
+      const b = before === '' ? null : before
+      const a = after === '' ? null : after
+      if (a !== b) ch[k] = a
+    }
+    return ch
+  }, [piece, form])
 
+  const valueChanged = useMemo(() => {
+    const n = (x) => (x === '' || x == null ? null : Number(x))
+    const s = (x) => (x || '').trim() || null
+    if (!canValue) return false
+    const usd = n(val.usd), clp = n(val.clp)
+    if (usd == null && clp == null) return false
+    return (
+      usd !== n(latest?.estimated_value_usd) ||
+      clp !== n(latest?.estimated_value_clp) ||
+      s(val.source) !== s(latest?.value_source) ||
+      val.confidence !== (latest?.confidence ?? 'Media')
+    )
+  }, [val, latest, canValue])
+
+  const dirty = Object.keys(pieceChanges).length > 0 || valueChanged
+
+  // Warn before leaving the tab with unsaved changes
+  useEffect(() => {
+    if (!dirty) return
+    const h = (e) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', h)
+    return () => window.removeEventListener('beforeunload', h)
+  }, [dirty])
+
+  // ---------- Save ----------
+  async function save() {
+    if (!dirty || saving) return true
+    setSaving(true)
+    try {
+      let newValuation = null
+      if (valueChanged) {
+        const row = {
+          piece_id: id,
+          estimated_value_usd: val.usd === '' ? null : Number(val.usd),
+          estimated_value_clp: val.clp === '' ? null : Number(val.clp),
+          value_source: val.source.trim() || 'Tasación directa',
+          confidence: val.confidence,
+          appraised_by: user?.email || 'Desconocido',
+          appraised_at: new Date().toISOString().split('T')[0],
+        }
+        const { data, error } = await supabase.from('valuations').insert(row).select('*').single()
+        if (error) throw new Error('valor')
+        newValuation = data
+        await supabase.from('activity_log').insert({
+          user_id: user?.id, action: 'valued', entity_type: 'valuation', entity_id: data.id,
+          changes: { piece_id: id, usd: row.estimated_value_usd, clp: row.estimated_value_clp },
+        })
+      }
+
+      const updates = { ...pieceChanges }
+      const merged = { ...piece, ...updates }
+      const completeness = calculateCompleteness(merged, {
+        hasPhoto: photos.length > 0,
+        hasValuation: valuations.length > 0 || !!newValuation,
+      })
+      if (Object.keys(updates).length > 0 || completeness !== piece.data_completeness) {
+        updates.data_completeness = completeness
+        const { error } = await supabase.from('pieces').update(updates).eq('id', id)
+        if (error) throw new Error('obra')
+        if (Object.keys(pieceChanges).length > 0) {
+          await supabase.from('activity_log').insert({
+            user_id: user?.id, action: 'updated', entity_type: 'piece', entity_id: id,
+            changes: pieceChanges,
+          })
+        }
+      }
+
+      show('Guardado ✓')
+      await fetchAll()
+      return true
+    } catch (e) {
+      show(e.message === 'valor' ? 'No se pudo guardar el valor' : 'No se pudo guardar la obra', { error: true })
+      return false
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // ---------- Prev / next ----------
+  const idx = navIds.indexOf(id)
+  const prevId = idx > 0 ? navIds[idx - 1] : null
+  const nextId = idx >= 0 && idx < navIds.length - 1 ? navIds[idx + 1] : null
+
+  async function saveAndGo(targetId) {
+    if (!targetId) return
+    const ok = await save()
+    if (ok) navigate(`/obra/${targetId}`)
+  }
+
+  function go(targetId) {
+    if (!targetId) return
+    if (dirty && !window.confirm('Tienes cambios sin guardar. ¿Descartarlos?')) return
+    navigate(`/obra/${targetId}`)
+  }
+
+  // Keyboard: Ctrl/Cmd+S saves, Ctrl/Cmd+Enter saves & next
+  useEffect(() => {
+    function onKey(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); save() }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); saveAndGo(nextId) }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
+  // ---------- Render ----------
+  if (loading && !piece) return <p className="text-center text-stone-400 py-12 text-lg">Cargando…</p>
+  if (!piece) return <p className="text-center text-stone-400 py-12 text-lg">Obra no encontrada</p>
+
+  const set = (k) => (v) => setForm((f) => ({ ...f, [k]: v }))
   const status = completenessStatus(piece.data_completeness || 0)
-  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+  const pct = piece.data_completeness || 0
+
+  const missing = []
+  if (!form.artist_id) missing.push('artista')
+  if (!form.title || form.title === 'Sin título') missing.push('título')
+  if (!form.medium) missing.push('técnica')
+  if (!form.dimensions) missing.push('dimensiones')
+  if (!form.year_created) missing.push('año')
+  if (!form.location) missing.push('ubicación')
+  if (photos.length === 0) missing.push('foto')
+  if (valuations.length === 0 && !val.usd && !val.clp) missing.push('valor')
 
   return (
-    <div className="max-w-2xl mx-auto px-4 py-4">
-      {/* Back */}
-      <Link to="/" className="text-sm text-stone-500 hover:text-stone-800 mb-4 inline-block">
-        ← Volver a galería
-      </Link>
+    <div className="max-w-3xl mx-auto px-4 pt-3 pb-28">
+      {toast}
+      {lightbox && <ImageLightbox src={lightbox} alt={piece.title} onClose={() => setLightbox(null)} />}
+
+      {/* Top row */}
+      <div className="flex items-center justify-between mb-3">
+        <Link to="/" className="text-base text-stone-500 hover:text-stone-900">← Galería</Link>
+        <div className="flex items-center gap-3 text-sm text-stone-500">
+          {idx >= 0 && <span>Obra {idx + 1} de {navIds.length}</span>}
+          {piece.inventory_number && <span className="font-mono text-stone-400">#{piece.inventory_number}</span>}
+        </div>
+      </div>
 
       {/* Photos */}
-      <div className="mb-6">
+      <div className="mb-5">
         {photos.length > 0 ? (
-          <div className="flex gap-2 overflow-x-auto snap-x">
-            {photos.map((photo) => (
-              <div key={photo.id} className="shrink-0 snap-center">
-                <img
-                  src={`${supabaseUrl}/storage/v1/object/public/thumbnails/${photo.thumbnail_path}`}
-                  alt={piece.title}
-                  className="h-64 sm:h-80 rounded-lg object-cover"
-                />
-              </div>
+          <div className="flex gap-3 overflow-x-auto snap-x pb-1 -mx-4 px-4">
+            {photos.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setLightbox(thumbUrl(p))}
+                className="shrink-0 snap-center rounded-2xl overflow-hidden bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-800"
+              >
+                <img src={thumbUrl(p)} alt={piece.title} className="h-72 sm:h-96 object-cover" />
+              </button>
             ))}
           </div>
         ) : (
-          <div className="h-48 bg-stone-100 rounded-lg flex items-center justify-center text-stone-300 text-5xl">
-            🖼
+          <div className="h-52 bg-stone-100 rounded-2xl flex flex-col items-center justify-center text-stone-400">
+            <span className="text-5xl mb-2">🖼</span>
+            <span className="text-base">Sin fotos todavía</span>
           </div>
         )}
       </div>
 
-      {/* Title + completeness */}
-      <div className="flex items-start justify-between mb-4">
-        <div>
-          <h2 className="text-xl font-semibold text-stone-900">{piece.title}</h2>
-          <p className="text-stone-500">
-            {piece.artist_name || 'Artista desconocido'}
+      {/* Completeness + actions row */}
+      <div className="card mb-4 !py-4">
+        <div className="flex items-center justify-between gap-3 mb-2">
+          <div className="flex items-center gap-2">
+            <div className={`dot-${status}`} />
+            <span className="text-lg font-semibold">{pct}% completa</span>
+          </div>
+          <div className="flex items-center gap-3">
+            <WishlistHeart pieceId={piece.id} />
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={async () => {
+                  await supabase.from('pieces').update({ is_locked: !piece.is_locked }).eq('id', id)
+                  await fetchAll()
+                }}
+                className={`text-sm px-3 py-1.5 rounded-full ${piece.is_locked ? 'bg-rose-100 text-rose-700' : 'bg-stone-100 text-stone-500'}`}
+              >
+                {piece.is_locked ? '🔒 Bloqueada' : '🔓 Bloquear'}
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="h-2.5 bg-stone-100 rounded-full overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all ${status === 'green' ? 'bg-emerald-500' : status === 'yellow' ? 'bg-amber-400' : 'bg-rose-400'}`}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        {missing.length > 0 && canEdit && (
+          <p className="text-base text-stone-500 mt-2">
+            Falta: <span className="text-stone-800 font-medium">{missing.join(', ')}</span>
           </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className={`dot-${status}`} />
-          <span className="text-xs text-stone-400">{piece.data_completeness || 0}%</span>
-        </div>
+        )}
+        {isLocked && <p className="text-sm text-rose-600 mt-2">Bloqueada por el administrador — solo lectura</p>}
+        {!canEdit && !isLocked && <p className="text-sm text-stone-400 mt-2">Modo lectura</p>}
       </div>
 
-      {/* Wishlist heart */}
-      <div className="mb-4">
-        <WishlistHeart pieceId={piece.id} />
-      </div>
+      {/* ---------- Card 1: Identidad ---------- */}
+      <section className="card mb-4">
+        <h3 className="card__title">Identidad</h3>
 
-      {/* Lock indicator + Edit toggle */}
-      <div className="flex items-center gap-3 mb-4">
-        {canEdit && !editing && (
-          <button
-            onClick={() => setEditing(true)}
-            className="text-sm text-stone-500 hover:text-stone-800"
-          >
-            Editar
-          </button>
-        )}
-        {isLocked && (
-          <span className="text-xs text-red-500">Bloqueada por admin</span>
-        )}
-        {isAdmin && (
-          <button
-            onClick={async () => {
-              await supabase.from('pieces').update({ is_locked: !piece.is_locked }).eq('id', id)
-              await fetchAll()
-            }}
-            className={`text-xs px-2 py-1 rounded ${piece.is_locked ? 'bg-red-100 text-red-700' : 'bg-stone-100 text-stone-500'}`}
-          >
-            {piece.is_locked ? 'Desbloquear' : 'Bloquear edición'}
-          </button>
-        )}
-      </div>
-
-      {/* Metadata */}
-      <div className="space-y-3 mb-6">
-        {editing ? (
-          <EditForm
-            form={form}
-            setForm={setForm}
-            onSave={handleSave}
-            onCancel={() => { setEditing(false); setForm(piece) }}
-            saving={saving}
+        <label className="field-label" htmlFor="f-title">Título</label>
+        {canEdit ? (
+          <input
+            id="f-title"
+            className="field-input field-input--title"
+            value={form.title}
+            onChange={(e) => set('title')(e.target.value)}
+            placeholder="Sin título"
           />
         ) : (
-          <MetadataDisplay piece={piece} />
+          <p className="field-read text-2xl font-semibold">{form.title || 'Sin título'}</p>
         )}
-      </div>
 
-      {/* Missing data prompts */}
-      {canEdit && !editing && <MissingPrompts piece={piece} photos={photos} valuations={valuations} onEdit={() => setEditing(true)} />}
-
-      {/* Valuations */}
-      <section className="mb-6">
-        <h3 className="text-sm font-semibold text-stone-700 mb-2 border-b pb-1">
-          Valoraciones ({valuations.length})
-        </h3>
-        {valuations.length === 0 ? (
-          <p className="text-sm text-stone-400">Sin valoraciones aún</p>
-        ) : (
-          <div className="space-y-2">
-            {valuations.map((v) => (
-              <div key={v.id} className="text-sm bg-white border border-stone-200 rounded-lg p-3">
-                <div className="flex justify-between">
-                  <span className="font-medium">
-                    {v.estimated_value_usd ? `$${Number(v.estimated_value_usd).toLocaleString()} USD` : ''}
-                    {v.estimated_value_usd && v.estimated_value_clp ? ' / ' : ''}
-                    {v.estimated_value_clp ? `$${Number(v.estimated_value_clp).toLocaleString()} CLP` : ''}
-                  </span>
-                  <span className={`text-xs px-2 py-0.5 rounded-full ${
-                    v.confidence === 'Alta' ? 'bg-green-100 text-green-700' :
-                    v.confidence === 'Media' ? 'bg-yellow-100 text-yellow-700' :
-                    'bg-red-100 text-red-700'
-                  }`}>
-                    {v.confidence}
-                  </span>
-                </div>
-                <p className="text-stone-500 text-xs mt-1">
-                  {v.value_source} — {v.appraised_by} ({v.appraised_at})
-                </p>
-                {v.notes && <p className="text-stone-400 text-xs mt-1">{v.notes}</p>}
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      {/* Activity log */}
-      <section>
-        <h3 className="text-sm font-semibold text-stone-700 mb-2 border-b pb-1">
-          Actividad reciente
-        </h3>
-        {activity.length === 0 ? (
-          <p className="text-sm text-stone-400">Sin actividad registrada</p>
-        ) : (
-          <div className="space-y-1">
-            {activity.map((a) => (
-              <p key={a.id} className="text-xs text-stone-400">
-                <span className="text-stone-600">{a.action}</span>
-                {' — '}
-                {new Date(a.created_at).toLocaleDateString('es-CL')}
-              </p>
-            ))}
-          </div>
-        )}
-      </section>
-    </div>
-  )
-}
-
-function MetadataDisplay({ piece }) {
-  const fields = [
-    { label: 'Año', value: piece.year_created },
-    { label: 'Técnica', value: piece.medium },
-    { label: 'Tipo', value: piece.type_of_art },
-    { label: 'Dimensiones', value: piece.dimensions },
-    { label: 'Ubicación', value: piece.location },
-    { label: 'Estado', value: piece.status },
-    { label: 'Firmada', value: piece.is_signed ? 'Sí' : 'No' },
-    { label: 'Inventario', value: piece.inventory_number },
-    { label: 'Procedencia', value: piece.provenance_notes },
-    { label: 'Descripción', value: piece.description },
-    { label: 'Notas', value: piece.notes },
-    { label: 'Condición', value: piece.condition_notes },
-  ]
-
-  return (
-    <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-      {fields.map((f) => (
-        <div key={f.label}>
-          <span className="text-stone-400 text-xs">{f.label}</span>
-          <p className="text-stone-700">{f.value || '—'}</p>
+        <div className="mt-5">
+          <label className="field-label">Artista</label>
+          <ArtistPicker
+            value={form.artist_id || null}
+            label={artistName}
+            disabled={!canEdit}
+            canCreate={canCreateArtist}
+            onError={(m) => show(m, { error: true })}
+            onChange={({ id: aid, name }) => { set('artist_id')(aid || ''); setArtistName(name) }}
+          />
         </div>
-      ))}
-    </div>
-  )
-}
 
-function EditForm({ form, setForm, onSave, onCancel, saving }) {
-  const set = (field) => (e) =>
-    setForm({ ...form, [field]: e.target.type === 'checkbox' ? e.target.checked : e.target.value })
+        <div className="mt-5 grid grid-cols-2 gap-4">
+          <div>
+            <label className="field-label" htmlFor="f-year">Año</label>
+            {canEdit ? (
+              <input
+                id="f-year"
+                className="field-input"
+                type="number"
+                inputMode="numeric"
+                min="1500"
+                max={new Date().getFullYear()}
+                value={form.year_created}
+                onChange={(e) => set('year_created')(e.target.value)}
+                placeholder="1985"
+              />
+            ) : <p className="field-read">{form.year_created || '—'}</p>}
+          </div>
+          <div>
+            <label className="field-label">Firmada</label>
+            <div className="flex items-center gap-3 min-h-14">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!!form.is_signed}
+                disabled={!canEdit}
+                onClick={() => set('is_signed')(!form.is_signed)}
+                className={`toggle ${form.is_signed ? 'toggle--on' : ''} disabled:cursor-default`}
+              >
+                <span className="toggle__knob" />
+              </button>
+              <span className="text-xl">{form.is_signed ? 'Sí' : 'No'}</span>
+            </div>
+          </div>
+        </div>
+      </section>
 
-  const inputClass = 'w-full px-2 py-1.5 border border-stone-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-stone-500'
+      {/* ---------- Card 2: Técnica ---------- */}
+      <section className="card mb-4">
+        <h3 className="card__title">Técnica y tamaño</h3>
 
-  return (
-    <div className="space-y-3">
-      <Field label="Título">
-        <input value={form.title || ''} onChange={set('title')} className={inputClass} />
-      </Field>
-      <Field label="Año">
-        <input type="number" value={form.year_created || ''} onChange={set('year_created')} className={inputClass} />
-      </Field>
-      <Field label="Técnica">
-        <input value={form.medium || ''} onChange={set('medium')} className={inputClass} placeholder="Óleo sobre tela" />
-      </Field>
-      <Field label="Tipo">
-        <select value={form.type_of_art || ''} onChange={set('type_of_art')} className={inputClass}>
-          <option value="">—</option>
-          {['Pintura', 'Escultura', 'Grabado', 'Fotografía', 'Dibujo', 'Mixta', 'Otro'].map((t) => (
-            <option key={t} value={t}>{t}</option>
+        <label className="field-label">Tipo</label>
+        <div className="flex flex-wrap gap-2 mb-5">
+          {TYPES.map((t) => (
+            <button
+              key={t}
+              type="button"
+              disabled={!canEdit}
+              onClick={() => set('type_of_art')(form.type_of_art === t ? '' : t)}
+              className={`chip ${form.type_of_art === t ? 'chip--on' : ''}`}
+            >
+              {t}
+            </button>
           ))}
-        </select>
-      </Field>
-      <Field label="Dimensiones">
-        <input value={form.dimensions || ''} onChange={set('dimensions')} className={inputClass} placeholder="80 × 60 cm" />
-      </Field>
-      <Field label="Ubicación">
-        <input value={form.location || ''} onChange={set('location')} className={inputClass} />
-      </Field>
-      <Field label="Estado">
-        <select value={form.status || ''} onChange={set('status')} className={inputClass}>
-          {['Disponible', 'Vendida', 'Donada', 'Perdida', 'Dañada'].map((s) => (
-            <option key={s} value={s}>{s}</option>
-          ))}
-        </select>
-      </Field>
-      <Field label="Condición">
-        <textarea value={form.condition_notes || ''} onChange={set('condition_notes')} className={inputClass} rows={2} />
-      </Field>
-      <Field label="Procedencia">
-        <textarea value={form.provenance_notes || ''} onChange={set('provenance_notes')} className={inputClass} rows={2} />
-      </Field>
-      <Field label="Descripción">
-        <textarea value={form.description || ''} onChange={set('description')} className={inputClass} rows={2} />
-      </Field>
-      <Field label="Notas">
-        <textarea value={form.notes || ''} onChange={set('notes')} className={inputClass} rows={2} />
-      </Field>
-      <Field label="Firmada">
-        <input type="checkbox" checked={form.is_signed || false} onChange={set('is_signed')} />
-      </Field>
+        </div>
 
-      <div className="flex gap-2 pt-2">
+        <label className="field-label" htmlFor="f-medium">Técnica</label>
+        {canEdit ? (
+          <>
+            <input
+              id="f-medium"
+              className="field-input"
+              list="techniques"
+              value={form.medium}
+              onChange={(e) => set('medium')(e.target.value)}
+              placeholder="Óleo sobre tela"
+            />
+            <datalist id="techniques">
+              {TECHNIQUES.map((t) => <option key={t} value={t} />)}
+            </datalist>
+          </>
+        ) : <p className="field-read">{form.medium || '—'}</p>}
+
+        <div className="mt-5">
+          <label className="field-label" htmlFor="f-dims">Dimensiones</label>
+          {canEdit ? (
+            <input
+              id="f-dims"
+              className="field-input"
+              value={form.dimensions}
+              onChange={(e) => set('dimensions')(e.target.value)}
+              placeholder="80 × 60 cm"
+            />
+          ) : <p className="field-read">{form.dimensions || '—'}</p>}
+        </div>
+      </section>
+
+      {/* ---------- Card 3: Valor ---------- */}
+      <section className="card mb-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mb-4">
+          <h3 className="card__title !mb-0">Valor estimado</h3>
+          {latest && (
+            <span className="text-sm text-stone-400">
+              Última: {latest.appraised_at} · {latest.appraised_by?.split('@')[0]}
+            </span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className="field-label" htmlFor="f-usd">USD</label>
+            {canValue ? (
+              <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-xl text-stone-400">$</span>
+                <input
+                  id="f-usd"
+                  className="field-input !pl-9"
+                  type="number"
+                  inputMode="decimal"
+                  min="0"
+                  value={val.usd}
+                  onChange={(e) => setVal((v) => ({ ...v, usd: e.target.value }))}
+                  placeholder="0"
+                />
+              </div>
+            ) : <p className="field-read">{latest?.estimated_value_usd ? `$${Number(latest.estimated_value_usd).toLocaleString()}` : '—'}</p>}
+          </div>
+          <div>
+            <label className="field-label" htmlFor="f-clp">CLP</label>
+            {canValue ? (
+              <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-xl text-stone-400">$</span>
+                <input
+                  id="f-clp"
+                  className="field-input !pl-9"
+                  type="number"
+                  inputMode="decimal"
+                  min="0"
+                  value={val.clp}
+                  onChange={(e) => setVal((v) => ({ ...v, clp: e.target.value }))}
+                  placeholder="0"
+                />
+              </div>
+            ) : <p className="field-read">{latest?.estimated_value_clp ? `$${Number(latest.estimated_value_clp).toLocaleString()}` : '—'}</p>}
+          </div>
+        </div>
+
+        {canValue && (
+          <>
+            <div className="mt-5">
+              <label className="field-label" htmlFor="f-source">Fuente</label>
+              <input
+                id="f-source"
+                className="field-input"
+                value={val.source}
+                onChange={(e) => setVal((v) => ({ ...v, source: e.target.value }))}
+                placeholder="Galería, tasador, subasta comparable…"
+              />
+            </div>
+            <div className="mt-5">
+              <label className="field-label">Confianza</label>
+              <div className="flex gap-2">
+                {CONFIDENCE.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => setVal((v) => ({ ...v, confidence: c }))}
+                    className={`chip flex-1 chip--${c.toLowerCase()} ${val.confidence === c ? 'chip--on' : ''}`}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+
+        {valuations.length > 1 && (
+          <details className="mt-4">
+            <summary className="text-sm text-stone-500 cursor-pointer">Historial ({valuations.length})</summary>
+            <ul className="mt-2 space-y-1 text-sm text-stone-500">
+              {valuations.slice(1).map((v) => (
+                <li key={v.id}>
+                  {v.appraised_at} — {v.estimated_value_usd ? `$${Number(v.estimated_value_usd).toLocaleString()} USD` : ''}
+                  {v.estimated_value_clp ? ` $${Number(v.estimated_value_clp).toLocaleString()} CLP` : ''} · {v.confidence} · {v.value_source}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </section>
+
+      {/* ---------- Card 4: Notas ---------- */}
+      <section className="card mb-4">
+        <h3 className="card__title">Notas</h3>
+        {canEdit ? (
+          <textarea
+            className="field-textarea"
+            value={form.notes}
+            onChange={(e) => set('notes')(e.target.value)}
+            placeholder="Historia de la obra, dónde se compró, anécdotas familiares…"
+          />
+        ) : <p className="field-read whitespace-pre-wrap">{form.notes || '—'}</p>}
+      </section>
+
+      {/* ---------- Card 5: Más detalles (collapsed) ---------- */}
+      <section className="card mb-4">
         <button
-          onClick={onSave}
-          disabled={saving}
-          className="px-4 py-2 bg-stone-800 text-white text-sm rounded-lg hover:bg-stone-700 disabled:opacity-50"
+          type="button"
+          onClick={() => setMoreOpen((o) => !o)}
+          className="w-full flex items-center justify-between text-left"
         >
-          {saving ? 'Guardando...' : 'Guardar'}
+          <h3 className="card__title !mb-0">Más detalles</h3>
+          <span className="text-stone-400 text-xl">{moreOpen ? '▴' : '▾'}</span>
         </button>
-        <button
-          onClick={onCancel}
-          className="px-4 py-2 text-stone-500 text-sm rounded-lg hover:bg-stone-100"
-        >
-          Cancelar
-        </button>
-      </div>
-    </div>
-  )
-}
+        {!moreOpen && (
+          <p className="text-base text-stone-500 mt-2">
+            {form.location || 'Sin ubicación'} · {form.status || 'Disponible'}
+          </p>
+        )}
+        {moreOpen && (
+          <div className="mt-4 space-y-5">
+            <div>
+              <label className="field-label" htmlFor="f-loc">Ubicación</label>
+              {canEdit ? (
+                <input id="f-loc" className="field-input" value={form.location} onChange={(e) => set('location')(e.target.value)} placeholder="Casa Vitacura, living" />
+              ) : <p className="field-read">{form.location || '—'}</p>}
+            </div>
+            <div>
+              <label className="field-label">Estado</label>
+              <div className="flex flex-wrap gap-2">
+                {STATUSES.map((s) => (
+                  <button key={s} type="button" disabled={!canEdit} onClick={() => set('status')(s)}
+                    className={`chip ${form.status === s ? 'chip--on' : ''}`}>{s}</button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="field-label" htmlFor="f-inv">N° inventario</label>
+              {canEdit ? (
+                <input id="f-inv" className="field-input font-mono" value={form.inventory_number} onChange={(e) => set('inventory_number')(e.target.value)} />
+              ) : <p className="field-read font-mono">{form.inventory_number || '—'}</p>}
+            </div>
+            <div>
+              <label className="field-label" htmlFor="f-prov">Procedencia</label>
+              {canEdit ? (
+                <textarea id="f-prov" className="field-textarea !min-h-24" value={form.provenance_notes} onChange={(e) => set('provenance_notes')(e.target.value)} placeholder="Comprada en…, regalo de…" />
+              ) : <p className="field-read whitespace-pre-wrap">{form.provenance_notes || '—'}</p>}
+            </div>
+            <div>
+              <label className="field-label" htmlFor="f-cond">Condición</label>
+              {canEdit ? (
+                <textarea id="f-cond" className="field-textarea !min-h-24" value={form.condition_notes} onChange={(e) => set('condition_notes')(e.target.value)} placeholder="Buen estado, marco original…" />
+              ) : <p className="field-read whitespace-pre-wrap">{form.condition_notes || '—'}</p>}
+            </div>
+            <div>
+              <label className="field-label" htmlFor="f-desc">Descripción</label>
+              {canEdit ? (
+                <textarea id="f-desc" className="field-textarea !min-h-24" value={form.description} onChange={(e) => set('description')(e.target.value)} />
+              ) : <p className="field-read whitespace-pre-wrap">{form.description || '—'}</p>}
+            </div>
+          </div>
+        )}
+      </section>
 
-function Field({ label, children }) {
-  return (
-    <div>
-      <label className="block text-xs text-stone-400 mb-0.5">{label}</label>
-      {children}
-    </div>
-  )
-}
-
-function MissingPrompts({ piece, photos, valuations, onEdit }) {
-  const missing = []
-  if (!piece.artist_name && !piece.artist_id)
-    missing.push('¿Conoces al artista? Toca para agregar')
-  if (piece.title === 'Sin título')
-    missing.push('¿Sabes el título de esta obra?')
-  if (!piece.medium)
-    missing.push('¿Qué técnica se usó? (óleo, acrílico, etc.)')
-  if (!piece.dimensions)
-    missing.push('¿Conoces las dimensiones?')
-  if (photos.length === 0)
-    missing.push('Esta obra no tiene fotos')
-  if (valuations.length === 0)
-    missing.push('Esta obra no ha sido valorada')
-
-  if (missing.length === 0) return null
-
-  return (
-    <div className="mb-6 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-      <p className="text-xs font-medium text-amber-800 mb-2">Datos faltantes:</p>
-      <div className="space-y-1">
-        {missing.map((msg, i) => (
-          <button
-            key={i}
-            onClick={onEdit}
-            className="block text-xs text-amber-700 hover:text-amber-900 underline"
-          >
-            {msg}
+      {/* ---------- Sticky action bar ---------- */}
+      <div className="action-bar">
+        <div className="max-w-3xl mx-auto px-4 py-3 flex items-center gap-2">
+          <button type="button" className="btn btn--ghost" onClick={() => go(prevId)} disabled={!prevId} aria-label="Anterior">
+            ←<span className="hidden sm:inline"> Anterior</span>
           </button>
-        ))}
+
+          {canEdit || canValue ? (
+            <>
+              <button
+                type="button"
+                className="btn btn--primary flex-1"
+                onClick={save}
+                disabled={!dirty || saving}
+              >
+                {saving ? 'Guardando…' : 'Guardar'}
+              </button>
+              <button
+                type="button"
+                className="btn btn--accent flex-[1.4]"
+                onClick={() => (dirty ? saveAndGo(nextId) : go(nextId))}
+                disabled={!nextId || saving}
+                title="Ctrl/Cmd + Enter"
+              >
+                {dirty ? 'Guardar y siguiente' : 'Siguiente'} →
+              </button>
+            </>
+          ) : (
+            <button type="button" className="btn btn--primary flex-1" onClick={() => go(nextId)} disabled={!nextId}>
+              Siguiente →
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )

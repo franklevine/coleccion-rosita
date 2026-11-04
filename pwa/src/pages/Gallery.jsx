@@ -85,6 +85,13 @@ export default function Gallery() {
       }
     })
 
+  // Publish the current order so the piece page's "siguiente / anterior" follows it
+  const orderKey = loading ? '' : filtered.map((p) => p.id).join(',')
+  useEffect(() => {
+    if (!orderKey) return
+    try { sessionStorage.setItem('rosita.nav.ids', JSON.stringify(orderKey.split(','))) } catch { /* ignore */ }
+  }, [orderKey])
+
   return (
     <div className="px-4 py-4">
       {/* Search */}

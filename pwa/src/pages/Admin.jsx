@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
+import { exportBackup } from '../lib/exportBackup'
 
 export default function Admin() {
   const { role } = useAuth()
@@ -162,47 +163,83 @@ function WishlistHeatmap() {
 }
 
 function ExportPanel() {
-  const [exporting, setExporting] = useState(false)
+  const [running, setRunning] = useState(false)
+  const [progress, setProgress] = useState(null)
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState(null)
 
-  async function exportCsv() {
-    setExporting(true)
-    const { data } = await supabase.from('pieces_with_details').select('*')
-
-    if (data) {
-      const headers = ['title', 'artist_name', 'year_created', 'medium', 'type_of_art', 'dimensions', 'location', 'status', 'latest_value_usd', 'data_completeness']
-      const csv = [
-        headers.join(','),
-        ...data.map((row) =>
-          headers.map((h) => {
-            const val = row[h] ?? ''
-            return typeof val === 'string' && val.includes(',') ? `"${val}"` : val
-          }).join(',')
-        ),
-      ].join('\n')
-
-      const blob = new Blob([csv], { type: 'text/csv' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `coleccion-rosita-${new Date().toISOString().split('T')[0]}.csv`
-      a.click()
-      URL.revokeObjectURL(url)
+  async function runBackup() {
+    setRunning(true)
+    setResult(null)
+    setError(null)
+    try {
+      const r = await exportBackup({ onProgress: setProgress })
+      setResult(r)
+    } catch (e) {
+      setError(e.message || 'Error al generar el respaldo')
+    } finally {
+      setRunning(false)
+      setProgress(null)
     }
-    setExporting(false)
   }
 
+  const pct = progress
+    ? progress.stage === 'zip'
+      ? Math.round(progress.done * 100)
+      : progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0
+    : 0
+
+  const fmtMb = (b) => `${(b / 1024 / 1024).toFixed(1)} MB`
+
   return (
-    <div>
-      <p className="text-sm text-stone-500 mb-3">
-        Exportar datos de la colección para respaldo o documentación.
+    <div className="card">
+      <h3 className="text-xl font-semibold text-stone-900 mb-1">Respaldo completo</h3>
+      <p className="text-base text-stone-500 mb-5">
+        Descarga un archivo <span className="font-mono">.zip</span> con toda la base de datos
+        (JSON), una tabla de obras (CSV para Excel) y todas las fotos. Guárdalo en Google Drive
+        o en tu computador.
       </p>
+
       <button
-        onClick={exportCsv}
-        disabled={exporting}
-        className="px-4 py-2 bg-stone-800 text-white text-sm rounded-lg hover:bg-stone-700 disabled:opacity-50"
+        onClick={runBackup}
+        disabled={running}
+        className="btn btn--primary w-full sm:w-auto"
       >
-        {exporting ? 'Exportando...' : 'Descargar CSV'}
+        {running ? 'Generando respaldo…' : '⬇ Descargar respaldo (.zip)'}
       </button>
+
+      {progress && (
+        <div className="mt-5">
+          <div className="flex justify-between text-base text-stone-600 mb-1.5">
+            <span>{progress.message}</span>
+            <span>{pct}%</span>
+          </div>
+          <div className="h-3 bg-stone-100 rounded-full overflow-hidden">
+            <div className="h-full bg-stone-800 rounded-full transition-all" style={{ width: `${pct}%` }} />
+          </div>
+        </div>
+      )}
+
+      {result && (
+        <div className="mt-5 p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-base text-emerald-900">
+          <p className="font-semibold">Respaldo listo ✓</p>
+          <p className="mt-1">
+            {result.fileName} · {fmtMb(result.bytes)} · {result.pieces} obras · {result.photos} fotos
+            {result.failedPhotos > 0 && <span className="text-rose-700"> · {result.failedPhotos} fotos no se pudieron descargar (ver LEEME.txt)</span>}
+          </p>
+        </div>
+      )}
+
+      {error && (
+        <div className="mt-5 p-4 bg-rose-50 border border-rose-200 rounded-xl text-base text-rose-800">
+          {error}
+        </div>
+      )}
+
+      <p className="mt-6 text-sm text-stone-400">
+        Contenido: <span className="font-mono">datos/respaldo.json</span>, <span className="font-mono">datos/obras.csv</span>, <span className="font-mono">fotos/</span>, <span className="font-mono">LEEME.txt</span>.
+        Las fotos en alta resolución siguen en Google Drive.
+      </p>
     </div>
   )
 }
